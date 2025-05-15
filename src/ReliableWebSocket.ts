@@ -1,4 +1,5 @@
 import { type BufferStore, IndexedDBBuffer, InMemoryBuffer } from "./BufferStores";
+import { ConnectionStateMachine, WSState } from "./ConnectionStateMachine";
 
 type WSMessage = string | ArrayBuffer | Uint8Array | Blob;
 
@@ -6,149 +7,123 @@ interface ReliableWebSocketOptions {
   url: string;
   usePersistentBuffer?: boolean;
   reconnectIntervalMs?: number;
-  onOpen?: () => void;
   onMessage?: (data: WSMessage) => void;
-  onClose?: () => void;
   onError?: (err: Event) => void;
-  onDisconnect?: () => void;
 }
-
 
 export class ReliableWebSocket {
   private ws: WebSocket | null = null;
-  private _state: 'closed' | 'connecting' | 'open' | 'reconnecting' = 'closed';
-  private manuallyClosed = false;
-
-  private readonly url: string;
-  private readonly reconnectIntervalMs: number;
-  private readonly persistent: boolean;
-  private readonly buffer: BufferStore;
-
-  private flushing = false;
   private reconnectTimeoutId: number | null = null;
 
-  private listeners: {
-    onOpen?: () => void;
-    onMessage?: (data: WSMessage) => void;
-    onClose?: () => void;
-    onError?: (err: Event) => void;
-    onDisconnect?: () => void;
-  };
+  private readonly url: string;
+  private readonly buffer: BufferStore;
+  private readonly reconnectIntervalMs: number;
+  private readonly stateMachine = new ConnectionStateMachine();
+
+  private onMessage?: (data: WSMessage) => void;
+  private onError?: (err: Event) => void;
 
   constructor(opts: ReliableWebSocketOptions) {
     this.url = opts.url;
     this.reconnectIntervalMs = opts.reconnectIntervalMs ?? 3000;
-    this.persistent = opts.usePersistentBuffer ?? true;
-
-    this.listeners = {
-      onOpen: opts.onOpen,
-      onMessage: opts.onMessage,
-      onClose: opts.onClose,
-      onError: opts.onError,
-      onDisconnect: opts.onDisconnect,
-    };
-
-    this.buffer = this.persistent ? new IndexedDBBuffer() : new InMemoryBuffer();
+    this.buffer = opts.usePersistentBuffer ? new IndexedDBBuffer() : new InMemoryBuffer();
+    this.onMessage = opts.onMessage;
+    this.onError = opts.onError;
   }
 
-  get state() {
-    return this._state;
+  get state(): WSState {
+    return this.stateMachine.state;
   }
 
-  async connect() {
+  onState(state: WSState, handler: () => void) {
+    this.stateMachine.subscribe(state, handler);
+  }
+
+  onStateChange(cb: (state: WSState) => void) {
+    this.stateMachine.onAnyChange(cb);
+  }
+
+  async connect(): Promise<void> {
     await this.buffer.init();
     this._connect();
   }
 
-  private _connect() {
-    if (this.manuallyClosed) return;
+  private _connect(): void {
+    const isInitial = this.stateMachine.state === 'closed';
+    this.stateMachine.set(isInitial ? 'connecting' : 'reconnecting');
 
-    this.ws?.close();
-
-    this._state = this._state === 'closed' ? 'connecting' : 'reconnecting';
     this.ws = new WebSocket(this.url);
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.onopen = async () => {
-      this._state = 'open';
-      console.log('[ReliableWebSocket] Connected');
       await this.flush();
-      this.listeners.onOpen?.();
+      this.stateMachine.set('open');
     };
 
-    this.ws.onmessage = (e) => this.listeners.onMessage?.(e.data);
+    this.ws.onmessage = (e) => {
+      this.onMessage?.(e.data);
+    };
+
+    this.ws.onerror = (err) => {
+      this.onError?.(err);
+    };
 
     this.ws.onclose = () => {
-      if (this.manuallyClosed) {
-        this._state = 'closed';
-        this.listeners.onClose?.();
-        return;
-      }
-
-      if (this._state !== 'reconnecting') {
-        this._state = 'reconnecting';
-        console.warn('[ReliableWebSocket] Disconnected, will retry...');
-        this.listeners.onDisconnect?.();
+      if (this.stateMachine.state !== 'reconnecting') {
+        this.stateMachine.set('reconnecting');
+        console.warn('[ReliableWebSocket] Disconnected, retrying...');
       }
 
       this.reconnectTimeoutId = window.setTimeout(() => {
         this._connect();
       }, this.reconnectIntervalMs);
     };
-
-    this.ws.onerror = (err) => {
-      if (!this.manuallyClosed) {
-        this.listeners.onError?.(err);
-      }
-    };
   }
 
-
-  send(data: WSMessage) {
-    let payload: ArrayBuffer;
-
-    if (typeof data === 'string') {
-      payload = new TextEncoder().encode(data).buffer;
-    } else if (data instanceof Uint8Array) {
-      payload = data.buffer;
-    } else if (data instanceof Blob) {
+  send(data: WSMessage): void {
+    if (data instanceof Blob) {
       const reader = new FileReader();
       reader.onload = () => this.sendOrBuffer(reader.result as ArrayBuffer);
       reader.readAsArrayBuffer(data);
       return;
-    } else {
-      payload = data;
     }
+
+    const payload =
+      typeof data === 'string'
+        ? new TextEncoder().encode(data).buffer
+        : data instanceof Uint8Array
+          ? data.buffer
+          : data;
 
     this.sendOrBuffer(payload);
   }
 
-  private sendOrBuffer(buffer: ArrayBuffer) {
-    if (this.ws?.readyState === WebSocket.OPEN && !this.flushing) {
+  private sendOrBuffer(buffer: ArrayBuffer): void {
+    if (this.ws?.readyState === WebSocket.OPEN && !this.stateMachine.is('flushing')) {
       this.ws.send(buffer);
     } else {
       this.buffer.save(buffer);
     }
   }
 
-  private async flush() {
-    if (this.flushing) return;
-    this.flushing = true;
+  private async flush(): Promise<void> {
+    if (this.stateMachine.is('flushing')) return;
 
     const items = await this.buffer.getAll();
+    if (items.length === 0) return;
+
+    this.stateMachine.set('flushing');
     for (const item of items) {
       if (this.ws?.readyState !== WebSocket.OPEN) break;
       this.ws.send(item.buffer);
-      await new Promise(r => setTimeout(r, 50));
+      await new Promise((r) => setTimeout(r, 50));
     }
 
     await this.buffer.clear();
-    this.flushing = false;
   }
 
-  close() {
-    this.manuallyClosed = true;
-    this._state = 'closed';
+  close(): void {
+    this.stateMachine.set('closed');
 
     if (this.reconnectTimeoutId !== null) {
       clearTimeout(this.reconnectTimeoutId);

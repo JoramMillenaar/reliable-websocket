@@ -17,11 +17,14 @@ export function setupDemoUI() {
   const socket = new ReliableWebSocket({
     url: 'ws://localhost:3000',
     onMessage: msg => log(`← ${typeof msg === 'string' ? msg : '[binary]'}`),
-    onOpen: () => log("✅ Connected"),
-    onDisconnect: () => log("⚠️ Disconnected"),
-    onClose: () => log("❌ Closed"),
     onError: err => console.error("WebSocket Error", err),
   });
+
+  socket.onState('connecting', () => log('🔌 Connecting...'));
+  socket.onState('open', () => log('✅ Ready to send messages...'));
+  socket.onState('flushing', () => log('📤 Flushing buffered messages...'));
+  socket.onState('reconnecting', () => log('🔁 Reconnecting...'));
+  socket.onState('closed', () => log('❌ Connection closed'));
 
   socket.connect().then(() => {
     $btn.onclick = () => {
