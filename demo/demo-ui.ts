@@ -6,31 +6,45 @@ export function setupDemoUI() {
   const $stop = document.getElementById('stopBtn') as HTMLButtonElement;
 
   const log = (msg: string) => {
+    console.log(msg);
     $log.textContent += msg + '\n';
     $log.scrollTop = $log.scrollHeight;
   };
 
+  let streaming = false;
+  let streamInterval: number | null = null;
 
   const socket = new ReliableWebSocket({
     url: 'ws://localhost:3000',
-    onMessage: msg => console.log("Received", msg),
-    onOpen: () => console.log("Connected!"),
-    onClose: () => console.log("Disconnected."),
-    onError: err => console.error("Error", err),
+    onMessage: msg => log(`← ${typeof msg === 'string' ? msg : '[binary]'}`),
+    onOpen: () => log("✅ Connected"),
+    onClose: () => log("⚠️ Disconnected"),
+    onError: err => console.error("WebSocket Error", err),
   });
 
   socket.connect().then(() => {
     $btn.onclick = () => {
-      socket.send("hello world");
-      socket.send(new Uint8Array([1, 2, 3]).buffer);
+      if (streaming) return;
+
+      streaming = true;
+      log('▶️ Stream started');
       $btn.disabled = true;
       $stop.disabled = false;
+      streamInterval = window.setInterval(() => {
+        if (!streaming) return;
+        socket.send(`ping ${Date.now()}`);
+      }, 1000);
     };
 
     $stop.onclick = () => {
+      streaming = false;
+      if (streamInterval !== null) {
+        clearInterval(streamInterval);
+        streamInterval = null;
+      }
       $btn.disabled = false;
       $stop.disabled = true;
-      log('⏹ stream stopped');
+      log('⏹ Stream stopped');
     };
   });
 }
