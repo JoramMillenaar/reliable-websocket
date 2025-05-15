@@ -26,31 +26,32 @@ export function setupDemoUI() {
   socket.onState('reconnecting', () => log('🔁 Reconnecting...'));
   socket.onState('closed', () => log('❌ Connection closed'));
 
-  socket.connect().then(() => {
-    $btn.onclick = () => {
+  $btn.onclick = () => {
+    socket.connect().then(() => {
       if (streaming) return;
 
       streaming = true;
-      log('▶️ Stream started');
       $btn.disabled = true;
       $stop.disabled = false;
+      log('▶️ Stream started');
       streamInterval = window.setInterval(() => {
         if (!streaming) return;
         socket.send(`ping ${Date.now()}`);
       }, 1000);
-    };
+    })
+  };
 
-    $stop.onclick = () => {
-      streaming = false;
-      if (streamInterval !== null) {
-        clearInterval(streamInterval);
-        streamInterval = null;
-      }
-      $btn.disabled = false;
-      $stop.disabled = true;
-      log('⏹ Stream stopped');
-    };
-  });
+  $stop.onclick = () => {
+    streaming = false;
+    log('⏹ Stream stopped');
+    if (streamInterval !== null) {
+      clearInterval(streamInterval);
+      streamInterval = null;
+    }
+    socket.close();
+    $btn.disabled = false;
+    $stop.disabled = true;
+  };
 }
 
 setupDemoUI();

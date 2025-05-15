@@ -65,10 +65,15 @@ export class ReliableWebSocket {
     };
 
     this.ws.onerror = (err) => {
-      this.onError?.(err);
+      if (this.stateMachine.state === 'reconnecting') {
+        console.debug('[ReliableWebSocket] Suppressed reconnection error:', err);
+      } else {
+        this.onError?.(err);
+      }
     };
 
     this.ws.onclose = () => {
+      if (this.stateMachine.state === 'closed') return;
       if (this.stateMachine.state !== 'reconnecting') {
         this.stateMachine.set('reconnecting');
         console.warn('[ReliableWebSocket] Disconnected, retrying...');
