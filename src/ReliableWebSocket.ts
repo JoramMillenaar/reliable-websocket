@@ -1,4 +1,4 @@
-import { type BufferStore, IndexedDBBuffer, InMemoryBuffer } from "./BufferStores.ts";
+import { type BufferStore, IndexedDBBuffer, InMemoryBuffer } from "./BufferStores";
 
 type WSMessage = string | ArrayBuffer | Uint8Array | Blob;
 
@@ -10,33 +10,49 @@ interface ReliableWebSocketOptions {
   onMessage?: (data: WSMessage) => void;
   onClose?: () => void;
   onError?: (err: Event) => void;
+  onDisconnect?: () => void;
 }
+
 
 export class ReliableWebSocket {
   private ws: WebSocket | null = null;
+  private _state: 'closed' | 'connecting' | 'open' | 'reconnecting' = 'closed';
+  private manuallyClosed = false;
+
   private readonly url: string;
   private readonly reconnectIntervalMs: number;
   private readonly persistent: boolean;
   private readonly buffer: BufferStore;
+
   private flushing = false;
+  private reconnectTimeoutId: number | null = null;
+
   private listeners: {
     onOpen?: () => void;
     onMessage?: (data: WSMessage) => void;
     onClose?: () => void;
     onError?: (err: Event) => void;
+    onDisconnect?: () => void;
   };
 
   constructor(opts: ReliableWebSocketOptions) {
     this.url = opts.url;
     this.reconnectIntervalMs = opts.reconnectIntervalMs ?? 3000;
     this.persistent = opts.usePersistentBuffer ?? true;
+
     this.listeners = {
       onOpen: opts.onOpen,
       onMessage: opts.onMessage,
       onClose: opts.onClose,
       onError: opts.onError,
+      onDisconnect: opts.onDisconnect,
     };
+
     this.buffer = this.persistent ? new IndexedDBBuffer() : new InMemoryBuffer();
+  }
+
+  get state() {
+    return this._state;
   }
 
   async connect() {
@@ -45,10 +61,16 @@ export class ReliableWebSocket {
   }
 
   private _connect() {
+    if (this.manuallyClosed) return;
+
+    this.ws?.close();
+
+    this._state = this._state === 'closed' ? 'connecting' : 'reconnecting';
     this.ws = new WebSocket(this.url);
     this.ws.binaryType = 'arraybuffer';
 
     this.ws.onopen = async () => {
+      this._state = 'open';
       console.log('[ReliableWebSocket] Connected');
       await this.flush();
       this.listeners.onOpen?.();
@@ -57,12 +79,28 @@ export class ReliableWebSocket {
     this.ws.onmessage = (e) => this.listeners.onMessage?.(e.data);
 
     this.ws.onclose = () => {
-      console.warn('[ReliableWebSocket] Disconnected, retrying...');
-      this.listeners.onClose?.();
-      setTimeout(() => this._connect(), this.reconnectIntervalMs);
+      if (this.manuallyClosed) {
+        this._state = 'closed';
+        this.listeners.onClose?.();
+        return;
+      }
+
+      if (this._state !== 'reconnecting') {
+        this._state = 'reconnecting';
+        console.warn('[ReliableWebSocket] Disconnected, will retry...');
+        this.listeners.onDisconnect?.();
+      }
+
+      this.reconnectTimeoutId = window.setTimeout(() => {
+        this._connect();
+      }, this.reconnectIntervalMs);
     };
 
-    this.ws.onerror = (err) => this.listeners.onError?.(err);
+    this.ws.onerror = (err) => {
+      if (!this.manuallyClosed) {
+        this.listeners.onError?.(err);
+      }
+    };
   }
 
 
@@ -75,8 +113,8 @@ export class ReliableWebSocket {
       payload = data.buffer;
     } else if (data instanceof Blob) {
       const reader = new FileReader();
-      reader.readAsArrayBuffer(data);
       reader.onload = () => this.sendOrBuffer(reader.result as ArrayBuffer);
+      reader.readAsArrayBuffer(data);
       return;
     } else {
       payload = data;
@@ -109,6 +147,14 @@ export class ReliableWebSocket {
   }
 
   close() {
+    this.manuallyClosed = true;
+    this._state = 'closed';
+
+    if (this.reconnectTimeoutId !== null) {
+      clearTimeout(this.reconnectTimeoutId);
+      this.reconnectTimeoutId = null;
+    }
+
     this.ws?.close();
   }
 }

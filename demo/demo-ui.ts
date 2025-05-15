@@ -18,7 +18,8 @@ export function setupDemoUI() {
     url: 'ws://localhost:3000',
     onMessage: msg => log(`← ${typeof msg === 'string' ? msg : '[binary]'}`),
     onOpen: () => log("✅ Connected"),
-    onClose: () => log("⚠️ Disconnected"),
+    onDisconnect: () => log("⚠️ Disconnected"),
+    onClose: () => log("❌ Closed"),
     onError: err => console.error("WebSocket Error", err),
   });
 
