@@ -1,7 +1,7 @@
 import { type BufferStore, IndexedDBBuffer, InMemoryBuffer } from "./BufferStores";
 import { ConnectionStateMachine, WSState } from "./ConnectionStateMachine";
 
-type WSMessage = string | ArrayBuffer | Uint8Array | Blob;
+export type WSMessage = string | ArrayBuffer | Uint8Array | Blob;
 
 interface ReliableWebSocketOptions {
   url: string;
